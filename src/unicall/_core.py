@@ -27,7 +27,11 @@ class Coalescer(Generic[P, T]):
         if task is None or task.done():
             task = asyncio.ensure_future(self._func(*args, **kwargs))
             self._flights[key] = task
-        return await task
+        # asyncio.shield matters here: awaiting `task` directly would let a
+        # caller's own cancellation (e.g. from asyncio.wait_for) propagate
+        # into `task` itself, cancelling the flight for every other waiter.
+        # shield lets a caller walk away without taking the flight down.
+        return await asyncio.shield(task)
 
 
 def unicall() -> Callable[[Callable[P, Awaitable[T]]], Coalescer[P, T]]:
