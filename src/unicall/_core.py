@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import inspect
 from collections.abc import Awaitable, Callable, Hashable
 from typing import Any, Generic, ParamSpec, TypeVar
 
@@ -15,8 +16,15 @@ class UnhashableArgumentsError(TypeError):
     """Raised when a call's arguments can't be turned into a dedup key."""
 
 
-def _default_key(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Hashable:
-    key = (args, tuple(sorted(kwargs.items())))
+def _default_key(
+    signature: inspect.Signature, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> Hashable:
+    # Bind through the function's own signature rather than hashing
+    # (args, kwargs) as received: f(5) and f(x=5) are the same call, and
+    # without this they landed under two different keys and ran twice.
+    bound = signature.bind(*args, **kwargs)
+    bound.apply_defaults()
+    key = tuple(sorted(bound.arguments.items()))
     try:
         hash(key)
     except TypeError as exc:
@@ -39,12 +47,13 @@ class Coalescer(Generic[P, T]):
         functools.update_wrapper(self, func)
         self._func = func
         self._key = key
+        self._signature = inspect.signature(func)
         self._flights: dict[Hashable, asyncio.Task[T]] = {}
 
     def _make_key(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Hashable:
         if self._key is not None:
             return self._key(*args, **kwargs)
-        return _default_key(args, kwargs)
+        return _default_key(self._signature, args, kwargs)
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
         key = self._make_key(args, kwargs)
