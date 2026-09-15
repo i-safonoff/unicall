@@ -1,6 +1,6 @@
 """Collapse concurrent async calls to the same thing into one flight."""
 
-from ._core import Coalescer, UnhashableArgumentsError, unicall
+from ._core import CoalescedFunction, Coalescer, UnhashableArgumentsError, unicall
 from ._distributed import (
     Backend,
     DistributedCoalescer,
@@ -15,6 +15,7 @@ from ._util import stable_hash
 
 __all__ = [
     "Backend",
+    "CoalescedFunction",
     "Coalescer",
     "DistributedCoalescer",
     "JSONSerializer",
@@ -28,4 +29,4 @@ __all__ = [
     "stable_hash",
     "unicall",
 ]
-__version__ = "0.2.0"
+__version__ = "0.2.1"
