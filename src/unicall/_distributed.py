@@ -5,9 +5,9 @@ import contextlib
 import json
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any, ParamSpec, Protocol, TypeVar
+from typing import Any, ParamSpec, Protocol, TypeVar, overload
 
-from ._core import Coalescer, KeyFunc
+from ._core import CoalescedFunction, Coalescer, KeyFunc
 from ._metrics import Metrics
 
 P = ParamSpec("P")
@@ -226,6 +226,29 @@ class DistributedCoalescer(Coalescer[P, T]):
         return _TIMED_OUT
 
 
+@overload
+def distributed(
+    backend: Backend,
+    *,
+    metrics: Metrics | None = None,
+    lease: float = 5.0,
+    wait_timeout: float = 10.0,
+    poll_interval: float = 0.015,
+    result_ttl: float = 5.0,
+    serializer: Serializer | None = None,
+) -> Callable[[Callable[P, Awaitable[T]]], CoalescedFunction[P, T]]: ...
+@overload
+def distributed(
+    backend: Backend,
+    *,
+    key: KeyFunc[P],
+    metrics: Metrics | None = None,
+    lease: float = 5.0,
+    wait_timeout: float = 10.0,
+    poll_interval: float = 0.015,
+    result_ttl: float = 5.0,
+    serializer: Serializer | None = None,
+) -> Callable[[Callable[P, Awaitable[T]]], CoalescedFunction[P, T]]: ...
 def distributed(
     backend: Backend,
     *,
@@ -236,7 +259,7 @@ def distributed(
     poll_interval: float = 0.015,
     result_ttl: float = 5.0,
     serializer: Serializer | None = None,
-) -> Callable[[Callable[P, Awaitable[T]]], DistributedCoalescer[P, T]]:
+) -> Callable[[Callable[P, Awaitable[T]]], CoalescedFunction[P, T]]:
     """Like `unicall()`, but flights are also coordinated across processes
     through `backend` (see `unicall.backends.redis.RedisBackend`).
 
@@ -246,9 +269,12 @@ def distributed(
     anything but does mean the same call can run twice. The lease is
     renewed automatically every `lease / 3` seconds while the function is
     still running.
+
+    Split into two @overloads above the real signature for the same reason
+    as `unicall()` -- see its docstring.
     """
 
-    def decorator(func: Callable[P, Awaitable[T]]) -> DistributedCoalescer[P, T]:
+    def decorator(func: Callable[P, Awaitable[T]]) -> CoalescedFunction[P, T]:
         return DistributedCoalescer(
             func,
             backend=backend,

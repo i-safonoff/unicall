@@ -11,7 +11,7 @@ async def test_different_keys_run_concurrently_not_serialized() -> None:
 
     loop = asyncio.get_running_loop()
     start = loop.time()
-    results = await asyncio.gather(f(1), f(2), f(3))
+    results = list(await asyncio.gather(f(1), f(2), f(3)))
     elapsed = loop.time() - start
 
     # Serialized behind one shared lock this would take ~0.15s; run in

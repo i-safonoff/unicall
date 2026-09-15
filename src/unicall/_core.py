@@ -5,14 +5,29 @@ import functools
 import inspect
 import time
 from collections.abc import Awaitable, Callable, Hashable
-from typing import Any, Generic, ParamSpec, TypeVar
+from typing import Any, Generic, ParamSpec, Protocol, TypeVar, overload
 
 from ._metrics import Metrics, Stats, _CountingMetrics
 
 P = ParamSpec("P")
 T = TypeVar("T")
+T_co = TypeVar("T_co", covariant=True)
 
 KeyFunc = Callable[P, Hashable]
+
+
+class CoalescedFunction(Protocol[P, T_co]):
+    """The public shape `unicall()` and `distributed()` hand back: still
+    callable like the original function, plus introspection.
+
+    A structural Protocol rather than the concrete `Coalescer[P, T]` class,
+    for the same reason `unicall()` and `distributed()` are `@overload`ed
+    below: see the note on those two. See also docs/DECISIONS.md.
+    """
+
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Awaitable[T_co]: ...
+    def in_flight(self) -> int: ...
+    def stats(self) -> Stats: ...
 
 
 class UnhashableArgumentsError(TypeError):
@@ -147,14 +162,31 @@ class Coalescer(Generic[P, T]):
         return Stats(**vars(self._counters.stats))
 
 
+@overload
+def unicall(
+    *, metrics: Metrics | None = None
+) -> Callable[[Callable[P, Awaitable[T]]], CoalescedFunction[P, T]]: ...
+@overload
+def unicall(
+    *, key: KeyFunc[P], metrics: Metrics | None = None
+) -> Callable[[Callable[P, Awaitable[T]]], CoalescedFunction[P, T]]: ...
 def unicall(
     *, key: KeyFunc[P] | None = None, metrics: Metrics | None = None
-) -> Callable[[Callable[P, Awaitable[T]]], Coalescer[P, T]]:
+) -> Callable[[Callable[P, Awaitable[T]]], CoalescedFunction[P, T]]:
     """Decorate an async function so concurrent calls with equal arguments
     (or an equal `key(...)`) share a single execution.
+
+    Split into two @overloads above the real signature: a `key: KeyFunc[P]
+    | None = None` parameter references the same P as the function being
+    decorated, and with no `key=` passed, mypy has nothing to bind P to at
+    this call itself -- some mypy versions then resolve P to `Never`
+    through the *combined* signature, rejecting every real call including
+    ones with no `key=` at all. Splitting the "no key" and "key provided"
+    cases into their own overloads (neither of which has an unconstrained
+    P sitting next to a bound one) avoids it. See docs/DECISIONS.md.
     """
 
-    def decorator(func: Callable[P, Awaitable[T]]) -> Coalescer[P, T]:
+    def decorator(func: Callable[P, Awaitable[T]]) -> CoalescedFunction[P, T]:
         return Coalescer(func, key=key, metrics=metrics)
 
     return decorator
