@@ -19,4 +19,17 @@ jobs:
       - run: ruff check src tests benchmarks
       - run: ruff format --check src tests benchmarks
       - run: mypy src
-      - run: pytest --cov
+      - run: pytest -m "not integration" --cov
+
+  # Separate from the matrix above: needs Docker (testcontainers spins up a
+  # real Redis), and one Python version is enough to prove the distributed
+  # backend's actual behavior -- the matrix already covers the language
+  # version, this covers the infrastructure.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -e ".[dev]"
+      - run: pytest -m integration
