@@ -76,7 +76,7 @@ class Coalescer(Generic[P, T]):
             self._counters.flight_started()
             if self._metrics is not None:
                 self._metrics.flight_started()
-            task = asyncio.ensure_future(self._run_and_record(self._func(*args, **kwargs)))
+            task = asyncio.ensure_future(self._run_and_record(self._execute(*args, **kwargs)))
             self._flights[key] = task
             task.add_done_callback(self._make_done_callback(key, task))
         else:
@@ -88,6 +88,14 @@ class Coalescer(Generic[P, T]):
         # into `task` itself, cancelling the flight for every other waiter.
         # shield lets a caller walk away without taking the flight down.
         return await asyncio.shield(task)
+
+    async def _execute(self, *args: P.args, **kwargs: P.kwargs) -> T:
+        """Hook point: what actually runs when this process becomes the
+        flight's leader. Overridden by DistributedCoalescer to coordinate
+        with other processes first; the base implementation just calls the
+        wrapped function.
+        """
+        return await self._func(*args, **kwargs)
 
     async def _run_and_record(self, coro: Awaitable[T]) -> T:
         start = time.monotonic()
