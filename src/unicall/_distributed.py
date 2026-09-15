@@ -134,6 +134,17 @@ class DistributedCoalescer(Coalescer[P, T]):
     async def _execute(self, *args: P.args, **kwargs: P.kwargs) -> T:
         remote_key = self._remote_key(args, kwargs)
         while True:
+            # Checked before every acquire attempt, not just while waiting
+            # on someone else's flight: a fast (or instant, or failing)
+            # function can publish its result and release its lock before a
+            # second caller's own try_acquire ever runs. That caller would
+            # find the lock gone and -- wrongly -- conclude it should become
+            # leader too, running the function a second time. The result
+            # outlives the lock (its own TTL, released or not), so checking
+            # for it first closes that window.
+            existing = await self._read_result(remote_key)
+            if existing is not _TIMED_OUT:
+                return existing  # type: ignore[no-any-return]
             token = uuid.uuid4().hex
             if await self._backend.try_acquire(remote_key, token, self._lease_ms):
                 return await self._run_as_leader(remote_key, token, args, kwargs)
@@ -191,16 +202,26 @@ class DistributedCoalescer(Coalescer[P, T]):
             if not lost_leadership:
                 await self._backend.release(remote_key, token)
 
+    async def _read_result(self, remote_key: str) -> Any:
+        """Non-blocking: the decoded result, or _TIMED_OUT if none is
+        published yet. Raises RemoteFlightError if the published outcome
+        was an error.
+        """
+        found, payload, error_info = await self._backend.poll_result(remote_key)
+        if not found:
+            return _TIMED_OUT
+        if error_info is not None:
+            raise RemoteFlightError(*error_info)
+        assert payload is not None
+        return self._serializer.loads(payload)
+
     async def _wait_for_remote(self, remote_key: str) -> Any:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._wait_timeout
         while loop.time() < deadline:
-            found, payload, error_info = await self._backend.poll_result(remote_key)
-            if found:
-                if error_info is not None:
-                    raise RemoteFlightError(*error_info)
-                assert payload is not None
-                return self._serializer.loads(payload)
+            outcome = await self._read_result(remote_key)
+            if outcome is not _TIMED_OUT:
+                return outcome
             await asyncio.sleep(self._poll_interval)
         return _TIMED_OUT
 
