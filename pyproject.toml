@@ -1,14 +1,14 @@
 [project]
 name = "unicall"
-version = "0.1.0"
-description = "Collapse concurrent async calls to the same thing into one flight"
+version = "0.2.0"
+description = "Collapse concurrent async calls to the same thing into one flight, in one process or across many"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Ivan Safonov", email = "i.safonoff.dev@gmail.com" }]
-keywords = ["asyncio", "singleflight", "request-coalescing", "cache-stampede", "concurrency"]
+keywords = ["asyncio", "singleflight", "request-coalescing", "cache-stampede", "concurrency", "redis", "distributed-lock"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
