@@ -15,7 +15,7 @@ async def test_positional_and_keyword_calls_share_a_key() -> None:
         await asyncio.sleep(0.02)
         return x
 
-    results = await asyncio.gather(f(5), f(x=5))
+    results = list(await asyncio.gather(f(5), f(x=5)))
 
     assert calls == 1
     assert results == [5, 5]
@@ -40,9 +40,11 @@ async def test_custom_key_function_overrides_the_default() -> None:
         await asyncio.sleep(0.02)
         return request["user_id"]
 
-    results = await asyncio.gather(
-        f({"user_id": 1, "trace": "a"}),
-        f({"user_id": 1, "trace": "b"}),
+    results = list(
+        await asyncio.gather(
+            f({"user_id": 1, "trace": "a"}),
+            f({"user_id": 1, "trace": "b"}),
+        )
     )
 
     assert calls == 1

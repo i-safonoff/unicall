@@ -22,7 +22,7 @@ async def test_stable_hash_as_a_key_recipe_for_large_arguments() -> None:
         await asyncio.sleep(0.02)
         return sum(items)
 
-    results = await asyncio.gather(total([1, 2, 3]), total([1, 2, 3]))
+    results = list(await asyncio.gather(total([1, 2, 3]), total([1, 2, 3])))
 
     assert calls == 1
     assert results == [6, 6]

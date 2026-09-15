@@ -204,3 +204,40 @@ coordination without a fencing token on the resource being protected, which
 this library has no way to require. Local correctness — the value returned
 to *this* process's own callers — never depended on any of this in the first
 place, so it's unaffected either way.
+
+---
+
+## 12. `unicall()` and `distributed()` return a `Protocol`, and are each split into two `@overload`s
+
+**Context.** A consumer project (`emissary`) hit `mypy --strict` errors on
+the most ordinary possible usage — bare `@unicall()`, no `key=` — with
+every argument rejected as incompatible with `def (*Never, **Never) -> ...`.
+Root cause, found by reducing it to a minimal reproduction: `key:
+KeyFunc[P] | None = None` references the same `P` as the function being
+decorated. With no `key=` passed, nothing at the `unicall()` call site
+binds `P` — and this version of mypy resolves an unconstrained `P` sitting
+in the same signature as a *used* `P` to `Never`, rather than deferring,
+for every call through that signature including the ones that would have
+worked fine alone. It also wasn't caught here: CI ran `mypy src`, never
+`mypy tests`, so `unicall`'s own test suite — full of exactly this pattern
+— had been failing `--strict` unnoticed since before it was written.
+
+**Decision.** Two changes, both required — either alone still fails:
+
+1. `unicall()`'s return type no longer names the concrete `Coalescer[P, T]`
+   class; it names a structural `CoalescedFunction[P, T]` `Protocol` instead
+   (callable, plus `in_flight()` and `stats()`).
+2. `unicall()` and `distributed()` are each split into two `@overload`s —
+   one with no `key=` parameter at all, one with `key: KeyFunc[P]` required
+   — above the real implementation, so no single signature ever has an
+   unconstrained `P` next to a bound one.
+
+CI now runs `mypy src tests`, not just `mypy src`.
+
+**Cost.** Two overloads (and a Protocol) to keep in sync with the real
+signature by hand instead of one. Code that reaches past the public
+interface into a concrete instance's private attributes (one test does,
+for `DistributedCoalescer._remote_key`) needs its own `# type:
+ignore[attr-defined]` now, since the Protocol doesn't expose them — a
+correct cost, not a workaround: that was already reaching past the
+documented API.

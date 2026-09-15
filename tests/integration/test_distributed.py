@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+from redis.asyncio import Redis
 
 from unicall import RemoteFlightError, UnserializableResultError, distributed
 from unicall.backends.redis import RedisBackend
@@ -8,7 +9,7 @@ from unicall.backends.redis import RedisBackend
 pytestmark = pytest.mark.integration
 
 
-async def test_two_coalescers_share_one_execution_via_redis(redis_client) -> None:
+async def test_two_coalescers_share_one_execution_via_redis(redis_client: Redis) -> None:
     backend = RedisBackend(redis_client)
     calls = 0
 
@@ -34,7 +35,7 @@ async def test_two_coalescers_share_one_execution_via_redis(redis_client) -> Non
     assert results == [42] * 10
 
 
-async def test_a_vanished_leader_is_recovered_after_its_lease_expires(redis_client) -> None:
+async def test_a_vanished_leader_is_recovered_after_its_lease_expires(redis_client: Redis) -> None:
     backend = RedisBackend(redis_client)
     calls = 0
 
@@ -44,7 +45,10 @@ async def test_a_vanished_leader_is_recovered_after_its_lease_expires(redis_clie
         return "alive"
 
     coalescer = distributed(backend, lease=0.05, wait_timeout=0.3, poll_interval=0.01)(f)
-    remote_key = coalescer._remote_key((), {})
+    # Reaching past the public (Protocol-typed) return of distributed() into
+    # the concrete DistributedCoalescer's own key-building logic, on purpose
+    # -- this test needs to seed Redis with the exact key coalescer will use.
+    remote_key = coalescer._remote_key((), {})  # type: ignore[attr-defined]
 
     # A "crashed" leader: it acquired the lock and then, unlike every real
     # execution path in this library, never renews, never publishes, never
@@ -58,7 +62,7 @@ async def test_a_vanished_leader_is_recovered_after_its_lease_expires(redis_clie
     assert calls == 1
 
 
-async def test_lease_renewal_keeps_a_long_flight_exclusive(redis_client) -> None:
+async def test_lease_renewal_keeps_a_long_flight_exclusive(redis_client: Redis) -> None:
     backend = RedisBackend(redis_client)
     calls = 0
 
@@ -77,13 +81,13 @@ async def test_lease_renewal_keeps_a_long_flight_exclusive(redis_client) -> None
     process_a = make(slow)
     process_b = make(slow)
 
-    results = await asyncio.gather(process_a(), process_b())
+    results = list(await asyncio.gather(process_a(), process_b()))
 
     assert calls == 1
     assert results == ["done", "done"]
 
 
-async def test_safe_release_does_not_delete_a_lock_it_no_longer_owns(redis_client) -> None:
+async def test_safe_release_does_not_delete_a_lock_it_no_longer_owns(redis_client: Redis) -> None:
     backend = RedisBackend(redis_client)
     key = "unicall:test:safe-release"
 
@@ -97,7 +101,7 @@ async def test_safe_release_does_not_delete_a_lock_it_no_longer_owns(redis_clien
     assert await redis_client.get(f"{key}:lock") == b"token-b"
 
 
-async def test_safe_renew_does_not_extend_a_lock_it_no_longer_owns(redis_client) -> None:
+async def test_safe_renew_does_not_extend_a_lock_it_no_longer_owns(redis_client: Redis) -> None:
     backend = RedisBackend(redis_client)
     key = "unicall:test:safe-renew"
 
@@ -111,7 +115,7 @@ async def test_safe_renew_does_not_extend_a_lock_it_no_longer_owns(redis_client)
     assert await redis_client.get(f"{key}:lock") == b"token-b"
 
 
-async def test_leaders_error_propagates_as_remote_flight_error(redis_client) -> None:
+async def test_leaders_error_propagates_as_remote_flight_error(redis_client: Redis) -> None:
     backend = RedisBackend(redis_client)
 
     async def boom() -> None:
@@ -135,7 +139,7 @@ async def test_leaders_error_propagates_as_remote_flight_error(redis_client) -> 
     assert remote_error.remote_message == "bad input"
 
 
-async def test_an_instant_flight_does_not_run_twice(redis_client) -> None:
+async def test_an_instant_flight_does_not_run_twice(redis_client: Redis) -> None:
     backend = RedisBackend(redis_client)
     calls = 0
 
@@ -162,7 +166,7 @@ async def test_an_instant_flight_does_not_run_twice(redis_client) -> None:
     assert results == [1] * 40
 
 
-async def test_unserializable_result_raises_a_clear_error(redis_client) -> None:
+async def test_unserializable_result_raises_a_clear_error(redis_client: Redis) -> None:
     backend = RedisBackend(redis_client)
 
     async def give_a_set() -> set[int]:
