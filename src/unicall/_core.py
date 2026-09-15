@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import time
 from collections.abc import Awaitable, Callable, Hashable
 from typing import Any, Generic, ParamSpec, TypeVar
+
+from ._metrics import Metrics, Stats, _CountingMetrics
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -43,12 +46,15 @@ class Coalescer(Generic[P, T]):
         func: Callable[P, Awaitable[T]],
         *,
         key: KeyFunc[P] | None = None,
+        metrics: Metrics | None = None,
     ) -> None:
         functools.update_wrapper(self, func)
         self._func = func
         self._key = key
         self._signature = inspect.signature(func)
         self._flights: dict[Hashable, asyncio.Task[T]] = {}
+        self._counters = _CountingMetrics()
+        self._metrics = metrics
 
     def _make_key(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Hashable:
         if self._key is not None:
@@ -57,6 +63,9 @@ class Coalescer(Generic[P, T]):
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
         key = self._make_key(args, kwargs)
+        self._counters.call_made()
+        if self._metrics is not None:
+            self._metrics.call_made()
         task = self._flights.get(key)
         # No `await` between the lookup above and the insert below. In
         # asyncio, only an await point yields control to another coroutine,
@@ -64,14 +73,37 @@ class Coalescer(Generic[P, T]):
         # would itself be the await that reopens the race it was meant to
         # close.
         if task is None:
-            task = asyncio.ensure_future(self._func(*args, **kwargs))
+            self._counters.flight_started()
+            if self._metrics is not None:
+                self._metrics.flight_started()
+            task = asyncio.ensure_future(self._run_and_record(self._func(*args, **kwargs)))
             self._flights[key] = task
             task.add_done_callback(self._make_done_callback(key, task))
+        else:
+            self._counters.call_coalesced()
+            if self._metrics is not None:
+                self._metrics.call_coalesced()
         # asyncio.shield matters here: awaiting `task` directly would let a
         # caller's own cancellation (e.g. from asyncio.wait_for) propagate
         # into `task` itself, cancelling the flight for every other waiter.
         # shield lets a caller walk away without taking the flight down.
         return await asyncio.shield(task)
+
+    async def _run_and_record(self, coro: Awaitable[T]) -> T:
+        start = time.monotonic()
+        try:
+            result = await coro
+        except Exception:
+            self._record_finished(ok=False, duration=time.monotonic() - start)
+            raise
+        else:
+            self._record_finished(ok=True, duration=time.monotonic() - start)
+            return result
+
+    def _record_finished(self, *, ok: bool, duration: float) -> None:
+        self._counters.flight_finished(ok=ok, duration=duration)
+        if self._metrics is not None:
+            self._metrics.flight_finished(ok=ok, duration=duration)
 
     def _make_done_callback(
         self, key: Hashable, task: asyncio.Task[T]
@@ -99,15 +131,22 @@ class Coalescer(Generic[P, T]):
         """Number of keys currently being awaited (not cached results)."""
         return len(self._flights)
 
+    def stats(self) -> Stats:
+        """Snapshot of this function's built-in counters. Always on, cheap
+        (four integers), no dependency -- for a real metrics backend, pass
+        `metrics=` instead of polling this.
+        """
+        return Stats(**vars(self._counters.stats))
+
 
 def unicall(
-    *, key: KeyFunc[P] | None = None
+    *, key: KeyFunc[P] | None = None, metrics: Metrics | None = None
 ) -> Callable[[Callable[P, Awaitable[T]]], Coalescer[P, T]]:
     """Decorate an async function so concurrent calls with equal arguments
     (or an equal `key(...)`) share a single execution.
     """
 
     def decorator(func: Callable[P, Awaitable[T]]) -> Coalescer[P, T]:
-        return Coalescer(func, key=key)
+        return Coalescer(func, key=key, metrics=metrics)
 
     return decorator
