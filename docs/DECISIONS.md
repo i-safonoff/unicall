@@ -92,3 +92,115 @@ already finished pays for a fresh one. What staying out buys: `@unicall()` on
 a function means exactly one thing — no two concurrent calls duplicate work —
 and never "the answer might be up to N milliseconds old." Mixing dedup with
 staleness is a different decorator's job.
+
+---
+
+## 6. `Stats` has four counters and no latency histogram
+
+**Context.** `Coalescer.stats()` needed *something* to say about how long a
+flight takes, or a duration-free stats object is an odd thing to ship next to
+a `metrics=` hook that receives every duration anyway.
+
+**Decision.** No histogram, no percentiles, no min/max — just
+`calls_total`, `flights_started`, `calls_coalesced`, `errors`.
+
+**Cost.** `.stats()` can tell you the coalesce ratio and nothing about
+latency. Doing that properly is buckets, decay, percentile estimation —
+reimplementing a chunk of Prometheus's `Histogram` badly, in a library whose
+entire pitch is doing one thing. `metrics=` already gets `duration` on every
+`flight_finished` call; a real metrics system's `Histogram.observe(duration)`
+is the right home for it.
+
+---
+
+## 7. `DistributedCoalescer` is a subclass with one overridden hook, not a parallel implementation
+
+**Context.** Cross-process coordination needed to sit somewhere without
+duplicating everything the local `Coalescer` already gets right — shield,
+eviction, metrics, per-key isolation.
+
+**Decision.** `Coalescer` gained one hook, `_execute()`, that by default
+just calls the wrapped function. `DistributedCoalescer` overrides only that,
+and inherits everything else unchanged.
+
+**Cost.** The hook is `_`-prefixed and undocumented as public API — a
+subclass reaching into it is relying on an implementation detail, not a
+contract. Accepted because the alternative (a second class reimplementing
+`__call__`, shield, and eviction) is the same logic maintained twice, and the
+two copies drifting apart is a worse failure mode than a private hook.
+
+---
+
+## 8. Followers poll for a result; they don't subscribe to one
+
+**Context.** A follower needs to learn when the leader's flight finishes.
+Redis offers both a blocking poll (repeated `GET`) and Pub/Sub (subscribe,
+get pushed to).
+
+**Decision.** Poll, on a fixed interval (`poll_interval`, default 15ms).
+
+**Cost.** A latency floor of up to one `poll_interval` on every follower,
+and repeated `GET`s against Redis for the whole wait. What it buys: Pub/Sub
+is fire-and-forget — a subscriber that subscribes after the publish already
+happened just misses the message, a gap this project already hit once from
+the other side, in [websocket-presence-board](https://github.com/i-safonoff/websocket-presence-board/blob/main/docs/DECISIONS.md#6-redis-pubsub-for-cross-instance-fan-out).
+Making that gap safe needs a subscribe-then-check-then-listen dance that is
+real complexity for a latency win a poll loop mostly gets anyway at these
+intervals.
+
+---
+
+## 9. A leader's exception crosses as `RemoteFlightError`, never itself
+
+**Context.** A follower needs to know the leader's flight failed, ideally
+with enough information to act on it.
+
+**Decision.** The leader publishes a type name and a message; a follower
+raises `RemoteFlightError(type_name, message)` — never an instance of the
+original exception class.
+
+**Cost.** `except ValueError` in a follower's caller does not catch what was,
+on the leader, a `ValueError`. Reconstructing the original type would mean
+either guessing at its constructor (most exception subclasses take more than
+a message) or deserializing something expressive enough to build arbitrary
+objects — which is the same door pickle opens. `RemoteFlightError` is honest
+about what actually crossed the wire: a string and a string.
+
+---
+
+## 10. The published result is checked before every acquire attempt, not only while waiting on someone else's flight
+
+**Context.** [Found by a failing test](https://github.com/i-safonoff/unicall/commit/bbffbcd):
+a fast (or instant, or immediately-failing) function lets its leader
+acquire, run, publish, and release the lock before a second caller's own
+`try_acquire` has even reached Redis. That caller finds no lock, concludes
+it should lead too, and runs the function a second time.
+
+**Decision.** `_execute` checks for an existing published result before
+every `try_acquire`, not only inside the follower's wait loop.
+
+**Cost.** One extra Redis round trip (`GET`) on the leader's own path too,
+paid on every acquire attempt including the very first one, for a race that
+only bites fast functions. Worth it: the alternative is a distributed
+coalescer that silently stops coalescing for exactly the calls cheap enough
+that duplicating them looks harmless — until it isn't.
+
+---
+
+## 11. A process that loses its lease publishes nothing
+
+**Context.** Renewal can fail mid-run (another process's lease has since
+expired ours and it took over). That process's own computation is still
+running and will still finish.
+
+**Decision.** If renewal ever fails, the rest of that run publishes no
+result, no error, and releases nothing — it just returns the answer to its
+own local callers, the same as if there were no distributed backend at all.
+
+**Cost.** A process in this state does real work that helps no one else,
+and the exactly-once guarantee this backend provides is closer to
+*at-most-duplicated-rarely* than a hard guarantee — inherent to lease-based
+coordination without a fencing token on the resource being protected, which
+this library has no way to require. Local correctness — the value returned
+to *this* process's own callers — never depended on any of this in the first
+place, so it's unaffected either way.
